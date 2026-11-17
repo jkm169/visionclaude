@@ -10,6 +10,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Pin Meta DAT SDK to 0.5.0 (compatible with StreamSession API)
+        run: |
+          find . \( -name "project.yml" -o -name "project.pbxproj" -o -name "Package.resolved" \) -exec \
+            sed -i '' 's/from: "0\.[0-9]\+\.[0-9]\+"/exactVersion: "0.5.0"/g; s/from: "1\.[0-9]\+\.[0-9]\+"/exactVersion: "0.5.0"/g' {} +
+          find . -name "project.pbxproj" -exec \
+            perl -0777 -i -pe 's/(meta-wearables-dat-ios.*?requirement = \{[^}]*?)kind = upToNextMajorVersion;\s*minimumVersion = [^;]+;/$1kind = exactVersion;\n\t\t\t\tversion = 0.5.0;/gs' {} +
+          find . -name "Package.resolved" -delete
+
       - name: Locate Xcode project and generate if needed
         id: locate
         run: |
