@@ -5,33 +5,55 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Generate Xcode project if needed
+      - name: Locate Xcode project and generate if needed
+        id: locate
         run: |
-          if command -v xcodegen &> /dev/null; then
-            find . -name "project.yml" -execdir xcodegen generate \;
-          else
+          if find . -name "project.yml" | grep -q .; then
             brew install xcodegen
             find . -name "project.yml" -execdir xcodegen generate \;
           fi
+          PROJECT=$(find . -name "*.xcodeproj" -maxdepth 4 | head -n 1)
+          echo "project=$PROJECT" >> $GITHUB_OUTPUT
+          echo "Found project: $PROJECT"
+          xcodebuild -list -project "$PROJECT"
+
+      - name: Resolve Swift Package dependencies
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project "${{ steps.locate.outputs.project }}" \
+            -scheme "ClaudeVision" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages"
 
       - name: Build unsigned xcarchive
         run: |
-          PROJECT=$(find . -name "*.xcodeproj" | head -n 1)
-          SCHEME=$(xcodebuild -list -project "$PROJECT" | awk '/Schemes:/{getline; print $1}')
+          set -o pipefail
           xcodebuild archive \
-            -project "$PROJECT" \
-            -scheme "$SCHEME" \
+            -project "${{ steps.locate.outputs.project }}" \
+            -scheme "ClaudeVision" \
             -configuration Release \
+            -sdk iphoneos \
             -destination "generic/platform=iOS" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
             -archivePath "$RUNNER_TEMP/VisionClaude.xcarchive" \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO \
+            SWIFT_STRICT_CONCURRENCY=minimal \
+            ENABLE_USER_SCRIPT_SANDBOXING=NO \
+
+            | tee "$RUNNER_TEMP/xcodebuild.log" | grep -E "error:|warning:|ARCHIVE SUCCEEDED|ARCHIVE FAILED" || true
+
+          if [ ! -d "$RUNNER_TEMP/VisionClaude.xcarchive" ]; then
+            echo "=== FULL BUILD ERROR TAIL ==="
+            tail -n 80 "$RUNNER_TEMP/xcodebuild.log"
+            exit 1
+          fi
 
       - name: Package IPA
         run: |
