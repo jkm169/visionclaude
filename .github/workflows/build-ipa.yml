@@ -10,12 +10,37 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Pin Meta DAT SDK to 0.5.0 (compatible with StreamSession API)
+      - name: Pin Meta DAT SDK to 0.5.0 in project.yml and pbxproj
         run: |
-          find . \( -name "project.yml" -o -name "project.pbxproj" -o -name "Package.resolved" \) -exec \
-            sed -i '' 's/from: "0\.[0-9]\+\.[0-9]\+"/exactVersion: "0.5.0"/g; s/from: "1\.[0-9]\+\.[0-9]\+"/exactVersion: "0.5.0"/g' {} +
-          find . -name "project.pbxproj" -exec \
-            perl -0777 -i -pe 's/(meta-wearables-dat-ios.*?requirement = \{[^}]*?)kind = upToNextMajorVersion;\s*minimumVersion = [^;]+;/$1kind = exactVersion;\n\t\t\t\tversion = 0.5.0;/gs' {} +
+          python3 -c '
+          import glob, re
+
+          for path in glob.glob("**/project.yml", recursive=True):
+              with open(path, "r") as f:
+                  text = f.read()
+              # Force meta-wearables-dat-ios package requirement to exactVersion 0.5.0
+              text = re.sub(
+                  r"(meta-wearables-dat-ios[^\n]*\n(?:\s+[^\n]+\n)*?\s+)(from|upToNextMajor|upToNextMinor|branch|revision):\s*[^\n]+",
+                  r"\1exactVersion: 0.5.0",
+                  text
+              )
+              with open(path, "w") as f:
+                  f.write(text)
+              print("Updated:", path)
+
+          for path in glob.glob("**/project.pbxproj", recursive=True):
+              with open(path, "r") as f:
+                  text = f.read()
+              text = re.sub(
+                  r"(meta-wearables-dat-ios.*?requirement = \{[^}]*?)kind = [^;]+;\s*(?:minimumVersion|version|branch|revision) = [^;]+;",
+                  r"\1kind = exactVersion;\n\t\t\t\tversion = 0.5.0;",
+                  text,
+                  flags=re.DOTALL
+              )
+              with open(path, "w") as f:
+                  f.write(text)
+              print("Updated:", path)
+          '
           find . -name "Package.resolved" -delete
 
       - name: Locate Xcode project and generate if needed
@@ -35,6 +60,7 @@ jobs:
             -project "${{ steps.locate.outputs.project }}" \
             -scheme "ClaudeVision" \
             -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages"
+          find "$RUNNER_TEMP/SourcePackages" -name "Package.resolved" -exec cat {} +
 
       - name: Build unsigned xcarchive
         run: |
