@@ -1,0 +1,47 @@
+name: Build VisionClaude IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Generate Xcode project if needed
+        run: |
+          if command -v xcodegen &> /dev/null; then
+            find . -name "project.yml" -execdir xcodegen generate \;
+          else
+            brew install xcodegen
+            find . -name "project.yml" -execdir xcodegen generate \;
+          fi
+
+      - name: Build unsigned xcarchive
+        run: |
+          PROJECT=$(find . -name "*.xcodeproj" | head -n 1)
+          SCHEME=$(xcodebuild -list -project "$PROJECT" | awk '/Schemes:/{getline; print $1}')
+          xcodebuild archive \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath "$RUNNER_TEMP/VisionClaude.xcarchive" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Package IPA
+        run: |
+          mkdir -p "$RUNNER_TEMP/Payload"
+          cp -r "$RUNNER_TEMP/VisionClaude.xcarchive/Products/Applications/"*.app "$RUNNER_TEMP/Payload/"
+          cd "$RUNNER_TEMP"
+          zip -r VisionClaude.ipa Payload
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VisionClaude-iOS
+          path: ${{ runner.temp }}/VisionClaude.ipa
