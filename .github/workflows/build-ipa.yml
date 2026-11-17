@@ -20,7 +20,6 @@ jobs:
           PROJECT=$(find . -name "*.xcodeproj" -maxdepth 4 | head -n 1)
           echo "project=$PROJECT" >> $GITHUB_OUTPUT
           echo "Found project: $PROJECT"
-          xcodebuild -list -project "$PROJECT"
 
       - name: Resolve Swift Package dependencies
         run: |
@@ -44,14 +43,14 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
+            SWIFT_VERSION=5.0 \
             SWIFT_STRICT_CONCURRENCY=minimal \
             ENABLE_USER_SCRIPT_SANDBOXING=NO \
-
-            | tee "$RUNNER_TEMP/xcodebuild.log" | grep -E "error:|warning:|ARCHIVE SUCCEEDED|ARCHIVE FAILED" || true
+            > "$RUNNER_TEMP/xcodebuild.log" 2>&1 || true
 
           if [ ! -d "$RUNNER_TEMP/VisionClaude.xcarchive" ]; then
-            echo "=== FULL BUILD ERROR TAIL ==="
-            tail -n 80 "$RUNNER_TEMP/xcodebuild.log"
+            echo "=== EXACT COMPILER ERRORS ==="
+            grep -E "\.swift:[0-9]+:[0-9]+: error:|error:" "$RUNNER_TEMP/xcodebuild.log" -C 3 || tail -n 100 "$RUNNER_TEMP/xcodebuild.log"
             exit 1
           fi
 
