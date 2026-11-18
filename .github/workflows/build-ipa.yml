@@ -12,35 +12,45 @@ jobs:
 
       - name: Pin Meta DAT SDK to 0.5.0 in project.yml and pbxproj
         run: |
-          python3 -c '
-          import glob, re
+          python3 - << 'EOF'
+          import os, re
 
-          for path in glob.glob("**/project.yml", recursive=True):
-              with open(path, "r") as f:
-                  text = f.read()
-              # Force meta-wearables-dat-ios package requirement to exactVersion 0.5.0
-              text = re.sub(
-                  r"(meta-wearables-dat-ios[^\n]*\n(?:\s+[^\n]+\n)*?\s+)(from|upToNextMajor|upToNextMinor|branch|revision):\s*[^\n]+",
-                  r"\1exactVersion: 0.5.0",
-                  text
-              )
-              with open(path, "w") as f:
-                  f.write(text)
-              print("Updated:", path)
-
-          for path in glob.glob("**/project.pbxproj", recursive=True):
-              with open(path, "r") as f:
-                  text = f.read()
-              text = re.sub(
-                  r"(meta-wearables-dat-ios.*?requirement = \{[^}]*?)kind = [^;]+;\s*(?:minimumVersion|version|branch|revision) = [^;]+;",
-                  r"\1kind = exactVersion;\n\t\t\t\tversion = 0.5.0;",
-                  text,
-                  flags=re.DOTALL
-              )
-              with open(path, "w") as f:
-                  f.write(text)
-              print("Updated:", path)
-          '
+          for root, dirs, files in os.walk("."):
+              dirs[:] = [d for d in dirs if d not in (".git", "node_modules", ".build")]
+              for fname in files:
+                  path = os.path.join(root, fname)
+                  if fname == "project.yml":
+                      with open(path, "r") as f:
+                          lines = f.readlines()
+                      in_meta = False
+                      out = []
+                      for line in lines:
+                          if "meta-wearables-dat-ios" in line:
+                              in_meta = True
+                          elif in_meta and line.strip() and not line.startswith((" ", "\t")):
+                              in_meta = False
+                          if in_meta and re.match(r"^\s+(from|upToNextMajor|upToNextMinor|branch|revision)\s*:", line):
+                              indent = re.match(r"^(\s+)", line).group(1)
+                              line = f"{indent}exactVersion: 0.5.0\n"
+                              in_meta = False
+                          out.append(line)
+                      with open(path, "w") as f:
+                          f.writelines(out)
+                      print("Updated:", path)
+                      print("".join(out))
+                  elif fname == "project.pbxproj":
+                      with open(path, "r") as f:
+                          text = f.read()
+                      text = re.sub(
+                          r"(meta-wearables-dat-ios[^{]*\{[^}]*?)kind = [^;]+;\s*(?:minimumVersion|version|branch|revision) = [^;]+;",
+                          r"\1kind = exactVersion;\n\t\t\t\tversion = 0.5.0;",
+                          text,
+                          count=1
+                      )
+                      with open(path, "w") as f:
+                          f.write(text)
+                      print("Updated:", path)
+          EOF
           find . -name "Package.resolved" -delete
 
       - name: Locate Xcode project and generate if needed
