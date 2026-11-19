@@ -16,7 +16,7 @@ class ClaudeBridge: NSObject, ObservableObject, URLSessionWebSocketDelegate {
     }
 
     // Callbacks
-    var onReply: ((String, String?) -> Void)?    // (text, audioURL?)
+    var onReply: ((String, String?, Data?) -> Void)?    // (text, audioURL?, inline audio?)
     var onStatus: ((String) -> Void)?
     var onThinking: ((String) -> Void)?
     var onDisconnect: (() -> Void)?
@@ -67,6 +67,8 @@ class ClaudeBridge: NSObject, ObservableObject, URLSessionWebSocketDelegate {
             request.setValue("Bearer \(config.channelToken)", forHTTPHeaderField: "Authorization")
         }
         let task = session.webSocketTask(with: request)
+        // Replies can carry the voice clip inline (base64 mp3); default 1 MB limit is too small for long answers
+        task.maximumMessageSize = 16 * 1024 * 1024
         self.webSocket = task
         task.resume()
         receiveMessage()
@@ -141,8 +143,9 @@ class ClaudeBridge: NSObject, ObservableObject, URLSessionWebSocketDelegate {
                 } else {
                     fullAudioUrl = nil
                 }
-                print("[Bridge] Reply: \(replyText.prefix(80))...")
-                self.onReply?(replyText, fullAudioUrl)
+                let inlineAudio = (json["audio_b64"] as? String).flatMap { Data(base64Encoded: $0) }
+                print("[Bridge] Reply: \(replyText.prefix(80))... audio: \(inlineAudio.map { "\($0.count) bytes inline" } ?? fullAudioUrl ?? "none")")
+                self.onReply?(replyText, fullAudioUrl, inlineAudio)
 
             case "thinking":
                 let thinkText = json["text"] as? String ?? ""

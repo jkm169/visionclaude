@@ -354,10 +354,19 @@ class SpeechManager: NSObject, ObservableObject {
                 }
                 data = d
             } catch {
-                self.fallBackToApple(fallbackText, reason: "download failed: \(error.localizedDescription)", completion: completion)
+                self.fallBackToApple(fallbackText, reason: "download from \(url.host ?? "?") failed: \(error.localizedDescription)", completion: completion)
                 return
             }
             print("[Speech] Playing remote audio: \(data.count) bytes from \(url.lastPathComponent)")
+            self.playAudioData(data, fallbackText: fallbackText, completion: completion)
+        }
+    }
+
+    /// Play an already-downloaded voice clip; falls back to the built-in voice if it can't play.
+    func playAudioData(_ data: Data, fallbackText: String, completion: @escaping () -> Void) {
+        isSpeaking = true
+        audioError = nil
+        Task { @MainActor in
             AudioDataPlayer.shared.play(data: data) { [weak self] ok in
                 Task { @MainActor in
                     guard let self else { return }
@@ -366,7 +375,7 @@ class SpeechManager: NSObject, ObservableObject {
                         print("[Speech] Remote audio playback finished")
                         completion()
                     } else {
-                        self.fallBackToApple(fallbackText, reason: "playback failed", completion: completion)
+                        self.fallBackToApple(fallbackText, reason: "playback failed (\(data.count) bytes)", completion: completion)
                     }
                 }
             }

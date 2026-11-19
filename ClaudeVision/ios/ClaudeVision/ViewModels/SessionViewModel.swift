@@ -93,14 +93,23 @@ class SessionViewModel: ObservableObject {
 
     private func setupBridgeCallbacks() {
         // When Claude replies via the channel
-        bridge.onReply = { [weak self] text, audioUrl in
+        bridge.onReply = { [weak self] text, audioUrl, audioData in
             Task { @MainActor [weak self] in
                 guard let self else { return }
 
                 self.transcript.append(TranscriptMessage(role: .assistant, text: text))
                 self.isProcessing = false
 
-                if let audioUrl, let url = URL(string: audioUrl) {
+                if let audioData {
+                    // Voice clip delivered inline over the WebSocket: play it directly
+                    self.state = .speaking
+                    self.speechManager.playAudioData(audioData, fallbackText: text) { [weak self] in
+                        Task { @MainActor in
+                            guard let self, self.isConnected, self.state == .speaking else { return }
+                            self.startListening()
+                        }
+                    }
+                } else if let audioUrl, let url = URL(string: audioUrl) {
                     // Play TTS audio from channel server
                     self.state = .speaking
                     self.speechManager.playRemoteAudio(url: url, fallbackText: text) { [weak self] in
