@@ -103,7 +103,7 @@ class SessionViewModel: ObservableObject {
                 if let audioUrl, let url = URL(string: audioUrl) {
                     // Play TTS audio from channel server
                     self.state = .speaking
-                    self.speechManager.playRemoteAudio(url: url) { [weak self] in
+                    self.speechManager.playRemoteAudio(url: url, fallbackText: text) { [weak self] in
                         Task { @MainActor in
                             guard let self, self.isConnected, self.state == .speaking else { return }
                             self.startListening()
@@ -309,6 +309,12 @@ class SessionViewModel: ObservableObject {
         }
 
         speechManager.setPauseThreshold(config.speechPauseThreshold)
+
+        speechManager.$audioError
+            .compactMap { $0 }
+            .receive(on: RunLoop.main)
+            .sink { [weak self] msg in self?.errorMessage = msg }
+            .store(in: &cancellables)
 
         NotificationCenter.default.publisher(for: .audioInterruptionBegan)
             .sink { [weak self] _ in

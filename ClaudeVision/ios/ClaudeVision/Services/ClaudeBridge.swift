@@ -29,6 +29,8 @@ class ClaudeBridge: NSObject, ObservableObject, URLSessionWebSocketDelegate {
     private let maxReconnectAttempts = 5
     private var isManualDisconnect = false
     private var pingTimer: Timer?
+    private var reconnectScheduled = false
+    private var lastReplyId: String?
 
     init(config: ClaudeConfig) {
         self.config = config
@@ -44,6 +46,16 @@ class ClaudeBridge: NSObject, ObservableObject, URLSessionWebSocketDelegate {
     func connectWebSocket() {
         isManualDisconnect = false
         reconnectAttempts = 0
+
+        // Close any previous socket first. Two open sockets meant the server saw two clients
+        // and every reply was delivered (and spoken) more than once.
+        pingTimer?.invalidate()
+        pingTimer = nil
+        let oldSocket = webSocket
+        let oldSession = urlSession
+        webSocket = nil
+        oldSocket?.cancel(with: .goingAway, reason: nil)
+        oldSession?.invalidateAndCancel()
 
         let wsURL = config.wsURL
         print("[Bridge] Connecting WebSocket to \(wsURL)")
@@ -71,8 +83,10 @@ class ClaudeBridge: NSObject, ObservableObject, URLSessionWebSocketDelegate {
     }
 
     private func receiveMessage() {
-        webSocket?.receive { [weak self] result in
-            guard let self else { return }
+        guard let task = webSocket else { return }
+        task.receive { [weak self] result in
+            // Ignore callbacks from sockets that have been replaced
+            guard let self, task === self.webSocket else { return }
             switch result {
             case .success(let message):
                 switch message {
@@ -115,6 +129,10 @@ class ClaudeBridge: NSObject, ObservableObject, URLSessionWebSocketDelegate {
                 self.onStatus?(status)
 
             case "reply":
+                if let id = json["id"] as? String {
+                    if id == self.lastReplyId { return }  // already handled this reply
+                    self.lastReplyId = id
+                }
                 let replyText = json["text"] as? String ?? ""
                 let audioUrl = json["audio_url"] as? String
                 let fullAudioUrl: String?
@@ -242,11 +260,19 @@ class ClaudeBridge: NSObject, ObservableObject, URLSessionWebSocketDelegate {
             print("[Bridge] Giving up reconnection after \(reconnectAttempts) attempts")
             return
         }
+        // A receive failure and a close event both arrive for the same drop; reconnect once.
+        guard !reconnectScheduled else { return }
+        reconnectScheduled = true
         reconnectAttempts += 1
+        let attempts = reconnectAttempts
         let delay = min(Double(reconnectAttempts) * 2.0, 10.0)
         print("[Bridge] Reconnecting in \(delay)s (attempt \(reconnectAttempts))")
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            self?.connectWebSocket()
+            guard let self else { return }
+            self.reconnectScheduled = false
+            guard !self.isManualDisconnect else { return }
+            self.connectWebSocket()
+            self.reconnectAttempts = attempts  // connectWebSocket resets it; keep the backoff count
         }
     }
 
@@ -270,8 +296,9 @@ class ClaudeBridge: NSObject, ObservableObject, URLSessionWebSocketDelegate {
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
         print("[Bridge] WebSocket closed: \(closeCode)")
         DispatchQueue.main.async { [weak self] in
-            self?.isConnected = false
-            self?.attemptReconnect()
+            guard let self, webSocketTask === self.webSocket else { return }  // stale socket
+            self.isConnected = false
+            self.attemptReconnect()
         }
     }
 

@@ -85,36 +85,76 @@ class ElevenLabsTTSClient {
 class AudioDataPlayer: NSObject, AVAudioPlayerDelegate {
     static let shared = AudioDataPlayer()
     private var player: AVAudioPlayer?
-    private var completion: (() -> Void)?
+    private var completion: ((Bool) -> Void)?
 
-    func play(data: Data, completion: @escaping () -> Void) {
-        self.completion = completion
-
+    /// Route output for speech playback.
+    /// Stays in .playAndRecord (the category the mic already uses) instead of switching to
+    /// .playback. The old category switch made replies silent on Ray-Ban glasses.
+    /// A2DP without HFP gives full-quality audio to the glasses' speakers. HFP is low-quality
+    /// call audio, which is why the voice sounded bad. startListening() switches back to HFP for the mic.
+    static func configureSessionForPlayback() {
+        let session = AVAudioSession.sharedInstance()
         do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
+            try session.setCategory(.playAndRecord, mode: .default,
+                                    options: [.defaultToSpeaker, .allowBluetoothA2DP])
             try session.setActive(true)
+        } catch {
+            print("[AudioPlayer] Session config failed (continuing anyway): \(error)")
+        }
+        let outs = session.currentRoute.outputs.map { "\($0.portName) [\($0.portType.rawValue)]" }
+        print("[AudioPlayer] Output route: \(outs.joined(separator: ", "))")
+    }
 
-            player = try AVAudioPlayer(data: data)
-            player?.delegate = self
-            player?.play()
+    /// Plays audio data. completion(true) when it finishes or is stopped, completion(false) if it could not play.
+    func play(data: Data, completion: @escaping (Bool) -> Void) {
+        // Drop any clip still playing without firing its completion (that would restart the mic mid-reply)
+        player?.stop()
+        player = nil
+        self.completion = nil
+        self.completion = completion
+        AudioDataPlayer.configureSessionForPlayback()
+        do {
+            let p = try AVAudioPlayer(data: data)
+            p.delegate = self
+            p.volume = 1.0
+            guard p.prepareToPlay(), p.play() else {
+                throw NSError(domain: "AudioDataPlayer", code: 1, userInfo: [
+                    NSLocalizedDescriptionKey: "player refused to start (\(data.count) bytes)"])
+            }
+            player = p
+            print("[AudioPlayer] Playing \(data.count) bytes, \(String(format: "%.1f", p.duration))s")
         } catch {
             print("[AudioPlayer] Error: \(error)")
-            completion()
+            finish(false)
         }
     }
 
     func stop() {
         player?.stop()
         player = nil
-        completion?()
+        finish(true)
+    }
+
+    private func finish(_ ok: Bool) {
+        let c = completion
         completion = nil
+        c?(ok)
     }
 
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         Task { @MainActor in
-            self.completion?()
-            self.completion = nil
+            guard player === self.player else { return }
+            self.player = nil
+            self.finish(flag)
+        }
+    }
+
+    func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
+        Task { @MainActor in
+            guard player === self.player else { return }
+            print("[AudioPlayer] Decode error: \(String(describing: error))")
+            self.player = nil
+            self.finish(false)
         }
     }
 }
@@ -127,6 +167,9 @@ class SpeechManager: NSObject, ObservableObject {
     @Published var transcribedText: String = ""
     @Published var isListening: Bool = false
     @Published var isSpeaking: Bool = false
+    /// Set when a voice reply could not be played (shown in the app instead of failing silently)
+    @Published var audioError: String?
+    private var appleCompletion: (() -> Void)?
 
     // STT
     private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
@@ -295,32 +338,46 @@ class SpeechManager: NSObject, ObservableObject {
         isSpeaking = false
     }
 
-    /// Play TTS audio from a remote URL (used in channel mode where server generates TTS)
-    func playRemoteAudio(url: URL, completion: @escaping () -> Void) {
+    /// Play TTS audio from a remote URL (used in channel mode where server generates TTS).
+    /// If the clip can't be downloaded or played, speaks `fallbackText` with the built-in voice
+    /// and reports the reason in `audioError`.
+    func playRemoteAudio(url: URL, fallbackText: String, completion: @escaping () -> Void) {
         isSpeaking = true
-        Task {
+        Task { @MainActor in
+            let data: Data
             do {
-                let (data, response) = try await URLSession.shared.data(from: url)
-                guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                    print("[Speech] Remote audio fetch failed")
-                    await MainActor.run { self.isSpeaking = false }
-                    completion()
+                let (d, response) = try await URLSession.shared.data(from: url)
+                let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+                guard status == 200, !d.isEmpty else {
+                    self.fallBackToApple(fallbackText, reason: "download failed (HTTP \(status))", completion: completion)
                     return
                 }
-                print("[Speech] Playing remote audio: \(data.count) bytes from \(url.lastPathComponent)")
-                AudioDataPlayer.shared.play(data: data) { [weak self] in
-                    Task { @MainActor in
-                        self?.isSpeaking = false
-                        print("[Speech] Remote audio playback finished")
-                    }
-                    completion()
-                }
+                data = d
             } catch {
-                print("[Speech] Remote audio error: \(error)")
-                await MainActor.run { self.isSpeaking = false }
-                completion()
+                self.fallBackToApple(fallbackText, reason: "download failed: \(error.localizedDescription)", completion: completion)
+                return
+            }
+            print("[Speech] Playing remote audio: \(data.count) bytes from \(url.lastPathComponent)")
+            AudioDataPlayer.shared.play(data: data) { [weak self] ok in
+                Task { @MainActor in
+                    guard let self else { return }
+                    if ok {
+                        self.isSpeaking = false
+                        print("[Speech] Remote audio playback finished")
+                        completion()
+                    } else {
+                        self.fallBackToApple(fallbackText, reason: "playback failed", completion: completion)
+                    }
+                }
             }
         }
+    }
+
+    private func fallBackToApple(_ text: String, reason: String, completion: @escaping () -> Void) {
+        print("[Speech] Voice clip \(reason), using built-in voice")
+        audioError = "Voice clip \(reason). Using built-in voice."
+        appleCompletion = completion
+        speakWithApple(text)
     }
 
     private func speakWithElevenLabs(_ client: ElevenLabsTTSClient, text: String) {
@@ -331,11 +388,17 @@ class SpeechManager: NSObject, ObservableObject {
                 let audioData = try await client.synthesize(text: text, voiceId: elevenLabsVoiceId)
                 print("[Speech] ElevenLabs: received \(audioData.count) bytes, playing...")
 
-                AudioDataPlayer.shared.play(data: audioData) { [weak self] in
+                AudioDataPlayer.shared.play(data: audioData) { [weak self] ok in
                     Task { @MainActor in
-                        self?.isSpeaking = false
-                        self?.onSpeechFinished?()
-                        print("[Speech] ElevenLabs playback finished")
+                        guard let self else { return }
+                        if ok {
+                            self.isSpeaking = false
+                            self.onSpeechFinished?()
+                            print("[Speech] ElevenLabs playback finished")
+                        } else {
+                            self.audioError = "ElevenLabs audio failed to play. Using built-in voice."
+                            self.speakWithApple(text)
+                        }
                     }
                 }
             } catch {
@@ -347,6 +410,8 @@ class SpeechManager: NSObject, ObservableObject {
     }
 
     private func speakWithApple(_ text: String) {
+        isSpeaking = true
+        AudioDataPlayer.configureSessionForPlayback()
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate
@@ -372,10 +437,16 @@ extension SpeechManager: AVSpeechSynthesizerDelegate {
         Task { @MainActor in
             self.isSpeaking = false
             self.onSpeechFinished?()
+            let c = self.appleCompletion
+            self.appleCompletion = nil
+            c?()
         }
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
-        Task { @MainActor in self.isSpeaking = false }
+        Task { @MainActor in
+            self.isSpeaking = false
+            self.appleCompletion = nil
+        }
     }
 }
