@@ -291,7 +291,8 @@ class SessionViewModel: ObservableObject {
         do {
             try speechManager.startListening()
             state = .listening
-            errorMessage = nil
+            // Only clear mic errors here; keep voice-playback errors visible so they can be read
+            if errorMessage?.hasPrefix("Mic:") == true { errorMessage = nil }
         } catch {
             errorMessage = "Mic: \(error.localizedDescription)"
         }

@@ -73,6 +73,10 @@
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
+		<!-- Allow plain http to the channel server on any address (e.g. Tailscale 100.x),
+		     otherwise iOS blocks the voice-clip download and replies fall back to the robotic voice -->
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
 	</dict>
 	<key>MWDAT</key>
 	<dict>
